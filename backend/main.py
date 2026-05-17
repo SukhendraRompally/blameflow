@@ -11,12 +11,21 @@ from pydantic import BaseModel
 import database
 from analyzer import analyze_incremental, analyze_new_thread, debug_symptom
 from github_client import fetch_diff, fetch_readme, fetch_recent_commits, parse_repo_url
-from llm import get_provider
+from llm import LLMProvider, get_provider
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
 
 database.init_db()
-llm = get_provider()
+
+# Lazy — instantiated on first request so the server starts even if LLM
+# credentials haven't been added to Render's env vars yet.
+_llm: LLMProvider | None = None
+
+def get_llm() -> LLMProvider:
+    global _llm
+    if _llm is None:
+        _llm = get_provider()
+    return _llm
 
 app = FastAPI(title="Blameflow API", version="1.0.0")
 
@@ -43,7 +52,8 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "llm_provider": llm.name}
+    provider_name = os.getenv("LLM_PROVIDER", "azure_openai")
+    return {"status": "ok", "llm_provider": provider_name}
 
 
 @app.get("/api/threads")
@@ -119,7 +129,7 @@ def sync_thread(req: SyncRequest):
     except Exception:
         full_diff = ""
 
-    cached_summary = analyze_new_thread(readme, full_diff, commits, llm)
+    cached_summary = analyze_new_thread(readme, full_diff, commits, get_llm())
     thread = database.create_thread(canonical_url, repo_name, head_sha, cached_summary)
 
     return {
@@ -150,7 +160,7 @@ def chat(thread_id: str, req: ChatRequest):
         raise HTTPException(status_code=422, detail="Thread has no analysis yet. Run a sync first.")
 
     history = database.get_chat_history(thread_id)
-    response_text = debug_symptom(thread["cached_summary"], history, req.message, llm)
+    response_text = debug_symptom(thread["cached_summary"], history, req.message, get_llm())
 
     database.add_chat_message(thread_id, "user", req.message)
     database.add_chat_message(thread_id, "assistant", response_text)

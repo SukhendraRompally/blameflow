@@ -7,6 +7,12 @@ from .base import LLMProvider
 
 class AzureOpenAIProvider(LLMProvider):
     def __init__(self) -> None:
+        for key in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_DEPLOYMENT"):
+            if not os.environ.get(key):
+                raise RuntimeError(
+                    f"Missing required environment variable: {key}. "
+                    "Add it in Render → blameflow-api → Environment."
+                )
         self._client = AzureOpenAI(
             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
