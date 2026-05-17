@@ -8,7 +8,13 @@ import psycopg2
 import psycopg2.extras
 
 # Render provides postgres:// but psycopg2 requires postgresql://
-_RAW_URL = os.environ["DATABASE_URL"]
+_RAW_URL = os.environ.get("DATABASE_URL")
+if not _RAW_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. "
+        "On Render: create a free PostgreSQL instance, then add its Internal Database URL "
+        "as the DATABASE_URL environment variable on this web service."
+    )
 DATABASE_URL = (
     _RAW_URL.replace("postgres://", "postgresql://", 1)
     if _RAW_URL.startswith("postgres://")
