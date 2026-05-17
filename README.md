@@ -129,7 +129,7 @@ blameflow/
 | Layer | Technology | Reason |
 |---|---|---|
 | Backend framework | FastAPI (Python) | Clean async routes, automatic OpenAPI docs, Pydantic validation |
-| Database | SQLite via stdlib `sqlite3` | Zero-dependency, file-based, easy to persist on Render disk |
+| Database | PostgreSQL via `psycopg2-binary` | Free managed instance on Render, persists across restarts and deploys |
 | GitHub integration | `httpx` + GitHub REST API | No local git cloning needed; diffs fetched via compare API |
 | LLM abstraction | Custom `LLMProvider` ABC | Provider-agnostic: swap Azure / Anthropic / OpenAI via env var |
 | Default LLM | Azure OpenAI | Enterprise-grade, private endpoint, compatible with OpenAI SDK |
@@ -207,8 +207,8 @@ threads table
 └── updated_at           TEXT  — ISO 8601 UTC timestamp
 
 chat_messages table
-├── id                   INTEGER — autoincrement primary key
-├── thread_id            TEXT    — foreign key → threads.thread_id
+├── id                   BIGSERIAL — auto-incrementing primary key
+├── thread_id            TEXT      — foreign key → threads.thread_id
 ├── role                 TEXT    — "user" or "assistant"
 ├── content              TEXT    — raw message content
 └── created_at           TEXT    — ISO 8601 UTC timestamp
@@ -325,6 +325,7 @@ To add a new provider, create a class in `backend/llm/` that extends `LLMProvide
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string — auto-injected on Render, set manually for local dev |
 | `LLM_PROVIDER` | No | `azure_openai` | Which LLM backend to use |
 | `AZURE_OPENAI_ENDPOINT` | If Azure | — | Your Azure OpenAI resource endpoint |
 | `AZURE_OPENAI_API_KEY` | If Azure | — | Azure OpenAI API key |
@@ -335,7 +336,6 @@ To add a new provider, create a class in `backend/llm/` that extends `LLMProvide
 | `OPENAI_API_KEY` | If OpenAI | — | OpenAI API key |
 | `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model ID |
 | `GITHUB_TOKEN` | No | — | GitHub PAT — raises rate limit from 60 to 5,000 req/hr |
-| `DB_PATH` | No | `./workspace.db` | Path to the SQLite database file |
 | `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS allowed origins |
 
 ### Frontend
@@ -351,6 +351,7 @@ To add a new provider, create a class in `backend/llm/` that extends `LLMProvide
 ### Prerequisites
 - Python 3.11+
 - Node.js 18+
+- PostgreSQL 14+ running locally (or a free cloud Postgres — [Supabase](https://supabase.com) and [Neon](https://neon.tech) both have free tiers)
 - A GitHub account (token optional but recommended)
 - An LLM API key (Azure OpenAI, Anthropic, or OpenAI)
 
@@ -401,31 +402,27 @@ Open `http://localhost:3000`, enter a public GitHub repo URL (e.g. `https://gith
 
 ### Backend on Render
 
-Blameflow includes a `render.yaml` in the `backend/` directory that Render auto-detects.
+Blameflow ships a `render.yaml` Blueprint at the repo root that provisions both the **web service** and a **free managed PostgreSQL database** in one step. `DATABASE_URL` is automatically injected — no manual wiring needed.
 
-1. Go to [render.com](https://render.com) → **New** → **Web Service**
-2. Connect your GitHub repository and select it
-3. Set **Root Directory** to `backend`
-4. Render reads `render.yaml` automatically — build and start commands are pre-configured
-5. Under **Environment**, add the following variables:
+1. Go to [render.com](https://render.com) → **New** → **Blueprint**
+2. Connect your GitHub account and select the `blameflow` repository
+3. Render reads `render.yaml` and shows you two resources to create:
+   - `blameflow-postgres` — free managed Postgres instance
+   - `blameflow-api` — Python web service pointed at `backend/`
+4. Click **Apply** — Render provisions the database first, injects `DATABASE_URL` into the web service, then builds and starts the API
+5. Once deployed, go to the `blameflow-api` service → **Environment** and fill in the secrets marked `sync: false`:
 
    | Key | Value |
    |---|---|
-   | `LLM_PROVIDER` | `azure_openai` |
-   | `AZURE_OPENAI_ENDPOINT` | your endpoint |
-   | `AZURE_OPENAI_API_KEY` | your key |
-   | `AZURE_OPENAI_DEPLOYMENT` | your deployment name |
+   | `AZURE_OPENAI_ENDPOINT` | your Azure endpoint |
+   | `AZURE_OPENAI_API_KEY` | your Azure key |
+   | `AZURE_OPENAI_DEPLOYMENT` | your deployment name (e.g. `gpt-4o`) |
    | `GITHUB_TOKEN` | your GitHub PAT (recommended) |
    | `ALLOWED_ORIGINS` | `https://your-app.vercel.app` |
 
-6. Under **Disks**, add a disk:
-   - Name: `blameflow-db`
-   - Mount path: `/var/data`
-   - The `DB_PATH=/var/data/workspace.db` env var is already set in `render.yaml`
+6. Save — Render redeploys automatically
 
-7. Click **Create Web Service** — Render will build and deploy automatically
-
-> **Note on the free tier:** Render's free tier does not include persistent disks. The SQLite database will reset on each deploy/restart. For persistent threads across restarts, use a paid plan with a disk, or replace `database.py` with a Postgres-backed implementation using a free Render Postgres instance.
+> **Free tier note:** The free Postgres instance on Render expires after 90 days and has a 1 GB storage limit. It is sufficient for development and early testing. The web service on the free plan spins down after 15 minutes of inactivity and takes ~30 seconds to cold-start on the next request.
 
 ### Frontend on Vercel
 

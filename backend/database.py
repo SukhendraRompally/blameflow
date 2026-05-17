@@ -1,42 +1,57 @@
 import os
-import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Generator, Optional
 
-DB_PATH = os.getenv("DB_PATH", "./workspace.db")
+import psycopg2
+import psycopg2.extras
+
+# Render provides postgres:// but psycopg2 requires postgresql://
+_RAW_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = (
+    _RAW_URL.replace("postgres://", "postgresql://", 1)
+    if _RAW_URL.startswith("postgres://")
+    else _RAW_URL
+)
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+@contextmanager
+def _conn() -> Generator[psycopg2.extensions.connection, None, None]:
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
-    with _connect() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS threads (
-                thread_id   TEXT PRIMARY KEY,
-                repo_url    TEXT UNIQUE NOT NULL,
-                repo_name   TEXT NOT NULL,
-                last_analyzed_commit TEXT,
-                cached_summary       TEXT,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                thread_id   TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                created_at  TEXT NOT NULL,
-                FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
-            )
-        """)
-        conn.commit()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS threads (
+                    thread_id            TEXT PRIMARY KEY,
+                    repo_url             TEXT UNIQUE NOT NULL,
+                    repo_name            TEXT NOT NULL,
+                    last_analyzed_commit TEXT,
+                    cached_summary       TEXT,
+                    created_at           TEXT NOT NULL,
+                    updated_at           TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id         BIGSERIAL PRIMARY KEY,
+                    thread_id  TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+                    role       TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
 
 
 def _now() -> str:
@@ -46,27 +61,26 @@ def _now() -> str:
 # ── Thread CRUD ───────────────────────────────────────────────────────────────
 
 def get_thread(repo_url: str) -> Optional[dict]:
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM threads WHERE repo_url = ?", (repo_url,)
-        ).fetchone()
-        return dict(row) if row else None
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM threads WHERE repo_url = %s", (repo_url,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def get_thread_by_id(thread_id: str) -> Optional[dict]:
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM threads WHERE thread_id = ?", (thread_id,)
-        ).fetchone()
-        return dict(row) if row else None
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM threads WHERE thread_id = %s", (thread_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def list_threads() -> list[dict]:
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM threads ORDER BY updated_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM threads ORDER BY updated_at DESC")
+            return [dict(r) for r in cur.fetchall()]
 
 
 def create_thread(
@@ -77,14 +91,16 @@ def create_thread(
 ) -> dict:
     thread_id = uuid.uuid4().hex[:8]
     now = _now()
-    with _connect() as conn:
-        conn.execute(
-            """INSERT INTO threads
-               (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary, now, now),
-        )
-        conn.commit()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO threads
+                    (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary, now, now),
+            )
     return get_thread_by_id(thread_id)
 
 
@@ -93,32 +109,35 @@ def update_thread(
     last_analyzed_commit: str,
     cached_summary: str,
 ) -> dict:
-    with _connect() as conn:
-        conn.execute(
-            """UPDATE threads
-               SET last_analyzed_commit = ?, cached_summary = ?, updated_at = ?
-               WHERE thread_id = ?""",
-            (last_analyzed_commit, cached_summary, _now(), thread_id),
-        )
-        conn.commit()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE threads
+                SET last_analyzed_commit = %s, cached_summary = %s, updated_at = %s
+                WHERE thread_id = %s
+                """,
+                (last_analyzed_commit, cached_summary, _now(), thread_id),
+            )
     return get_thread_by_id(thread_id)
 
 
 # ── Chat CRUD ─────────────────────────────────────────────────────────────────
 
 def get_chat_history(thread_id: str) -> list[dict]:
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT role, content FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC",
-            (thread_id,),
-        ).fetchall()
-        return [{"role": r["role"], "content": r["content"]} for r in rows]
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content FROM chat_messages WHERE thread_id = %s ORDER BY created_at ASC",
+                (thread_id,),
+            )
+            return [{"role": r["role"], "content": r["content"]} for r in cur.fetchall()]
 
 
 def add_chat_message(thread_id: str, role: str, content: str) -> None:
-    with _connect() as conn:
-        conn.execute(
-            "INSERT INTO chat_messages (thread_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (thread_id, role, content, _now()),
-        )
-        conn.commit()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO chat_messages (thread_id, role, content, created_at) VALUES (%s, %s, %s, %s)",
+                (thread_id, role, content, _now()),
+            )
