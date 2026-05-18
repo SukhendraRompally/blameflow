@@ -2,7 +2,7 @@
 
 **Trace the fault. Own the code.**
 
-Blameflow is an AI-powered git forensics tool built for engineers who need to understand what a codebase has been doing recently — and who broke what. Point it at any public GitHub repository and it will analyze the last five commits, surface pre-emptive architectural risks, and let you debug production symptoms in plain English, pinpointing the exact commit hash, filename, and line numbers responsible.
+Blameflow is an AI-powered git forensics tool built for engineers who need to understand what a codebase is doing — and who broke what. Point it at any public GitHub repository and it performs a full source tree scan on first pull, builds a deep architectural model, surfaces pre-emptive risks, and lets you debug production symptoms in plain English — pinpointing the exact commit hash, filename, and line numbers responsible. Every subsequent visit only analyzes new commits, keeping it fast and cheap.
 
 ---
 
@@ -28,15 +28,15 @@ Blameflow is an AI-powered git forensics tool built for engineers who need to un
 Blameflow has three core capabilities:
 
 ### 1. Repository Ingestion and Incremental Caching
-When you enter a GitHub repo URL, Blameflow fetches the last five commits, the README, and the cumulative diff across those commits. It sends this to an LLM to generate a structured codebase overview and risk report. This report is stored as a persistent **Thread**.
+When you enter a GitHub repo URL for the first time, Blameflow performs a **full source tree scan**: it fetches every relevant source file in the repository (up to 80 files / 120k characters, prioritised by file type), along with the README and recent commits. This full context is sent to the LLM to build a deep architectural model and risk report, which is stored as a persistent **Thread**.
 
-The next time the same repo is opened, Blameflow compares the current HEAD commit against the stored one. If no new commits have landed, it loads the cached report instantly with zero LLM calls. If new commits exist, it fetches **only the delta diff** and incrementally updates the report, never re-analyzing commits that were already processed.
+Every subsequent visit compares the current HEAD commit SHA against the stored one. If nothing has changed, the cached report loads instantly with zero LLM calls. If new commits have landed, Blameflow fetches **only the delta diff** since the last sync and incrementally updates the report — never re-processing history that was already analyzed.
 
 ### 2. Pre-emptive Risk Dashboard
 Every thread produces a structured risk report with three sections:
-- **Codebase Overview** — what the repo does architecturally, key modules and patterns inferred from the diff and README
-- **Recent Activity Summary** — plain-English explanation of what the last commits changed structurally, not just which files touched
-- **Pre-emptive Risk Flags** — 2–4 specific warnings about hidden architectural risks introduced by those commits, such as a utility function being modified without updating callers, missing validation on a new API parameter, or a silent breaking change to a shared interface
+- **Codebase Overview** — a deep architectural summary covering the repo's purpose, module structure, key patterns, and how major components interact — grounded in actual function names and file paths from the source tree
+- **Recent Activity Summary** — plain-English explanation of what the latest commits changed structurally, and which other modules those changes touch
+- **Pre-emptive Risk Flags** — 3–5 specific warnings about hidden architectural risks visible in the code, such as a utility function being modified without updating all callers, missing input validation on a new API parameter, or implicit coupling between modules that wasn't obvious from the commit message
 
 ### 3. Natural Language Debugger
 A persistent chat interface lets you describe a production symptom in plain English. Blameflow evaluates the symptom against the full cached context (the architecture model plus the commit diff history) and returns a structured forensic response:
@@ -68,22 +68,22 @@ User enters GitHub URL
          │
          ▼
 ┌────────────────────────────────────┐
-│  Check workspace.db for existing   │
+│  Check PostgreSQL for existing     │
 │  thread matching this repo URL     │
 └────────┬───────────────────────────┘
          │
-    ─────┴──────────────────────────
-    │                              │
-No thread                    Thread exists
-    │                              │
-    ▼                         ─────┴──────
-Fetch README              HEAD SHA      HEAD SHA
-+ full diff          matches stored  differs from stored
-+ analyze (LLM)           │                │
-+ save thread             ▼                ▼
-                    Load from cache   Fetch delta diff only
-                    (0 LLM calls)     + incremental update (LLM)
-                                      + update stored SHA
+    ─────┴──────────────────────────────────
+    │                                      │
+No thread                           Thread exists
+    │                                      │
+    ▼                               ───────┴────────
+Fetch README                    HEAD SHA        HEAD SHA
++ FULL source tree          matches stored   differs from stored
+  (recursive tree API,            │                  │
+   up to 80 files / 120k)         ▼                  ▼
++ analyze (LLM)           Load from cache    Fetch delta diff only
++ save thread             (0 LLM calls)      + incremental update (LLM)
+                                             + update stored SHA
 ```
 
 All LLM interaction happens through a generic `LLMProvider` abstract interface. Swapping the AI brain is a one-line environment variable change.
@@ -130,10 +130,10 @@ blameflow/
 |---|---|---|
 | Backend framework | FastAPI (Python) | Clean async routes, automatic OpenAPI docs, Pydantic validation |
 | Database | PostgreSQL via `psycopg2-binary` | Free managed instance on Render, persists across restarts and deploys |
-| GitHub integration | `httpx` + GitHub REST API | No local git cloning needed; diffs fetched via compare API |
+| GitHub integration | `httpx` + GitHub REST API | Full tree scan on first pull via recursive tree API; delta diffs on subsequent syncs |
 | LLM abstraction | Custom `LLMProvider` ABC | Provider-agnostic: swap Azure / Anthropic / OpenAI via env var |
 | Default LLM | Azure OpenAI | Enterprise-grade, private endpoint, compatible with OpenAI SDK |
-| Frontend framework | Next.js 14 (App Router) | React server/client split, Vercel-native, fast cold starts |
+| Frontend framework | Next.js 15 (App Router) | React server/client split, Vercel-native, fast cold starts |
 | Styling | Tailwind CSS | Utility-first, zero runtime, dark theme via CSS variables |
 | Markdown rendering | `react-markdown` + `remark-gfm` | Safe server-side markdown from LLM responses |
 | Icons | `lucide-react` | Consistent, lightweight, tree-shakeable |
@@ -148,28 +148,30 @@ blameflow/
 The FastAPI application entrypoint. Initializes the database and LLM provider at startup, registers CORS middleware, and defines four route handlers. The `sync_thread` route contains the core branching logic (new thread vs. cache hit vs. incremental update).
 
 #### `database.py`
-Manages a local SQLite database (`workspace.db`) with two tables:
+Manages a PostgreSQL database with two tables:
 
-- `threads` — one row per repository, storing the analysis state
+- `threads` — one row per repository, storing the full analysis state including the cached LLM report
 - `chat_messages` — append-only log of all debugger conversations per thread
 
-All functions use the stdlib `sqlite3` module with `row_factory = sqlite3.Row` for dict-like access.
+Uses `psycopg2` with `RealDictCursor` for dict-like row access. Automatically rewrites `postgres://` URLs to `postgresql://` to handle Render's connection string format.
 
 #### `github_client.py`
-Three functions wrapping the GitHub REST API:
+Five functions wrapping the GitHub REST API:
 
 - `fetch_recent_commits` — retrieves the last N commits with SHA, message, author, and date
-- `fetch_readme` — decodes the base64-encoded README content, capped at 8,000 characters
-- `fetch_diff` — calls the compare API, stitches together `files[].patch` fields into a unified diff string, hard-capped at 40,000 characters to control token costs
+- `fetch_readme` — decodes the base64-encoded README, capped at 8,000 characters
+- `fetch_full_codebase` — **new-thread only**: fetches the entire source tree via the recursive tree API, filters out binary files and build artefacts, prioritises source code over config over docs, and concatenates file contents up to 80 files / 120,000 characters
+- `fetch_diff` — **incremental only**: calls the compare API and stitches `files[].patch` fields into a unified diff string, capped at 40,000 characters
+- `_fetch_file_tree` / `_fetch_file_content` — internal helpers used by `fetch_full_codebase`
 
-Respects a `GITHUB_TOKEN` env var. Without it, GitHub's unauthenticated rate limit of 60 requests/hour applies. With it, the limit rises to 5,000/hour.
+Respects a `GITHUB_TOKEN` env var. Without it, GitHub's unauthenticated rate limit is 60 requests/hour — which can be a problem for large repos during the initial full scan. With a token the limit rises to 5,000/hour.
 
 #### `analyzer.py`
 Contains three LLM prompt functions, each accepting a `LLMProvider` instance:
 
-- `analyze_new_thread(readme, diff, commits, llm)` — generates the initial full report from README + cumulative diff
-- `analyze_incremental(cached_summary, delta_diff, new_commits, llm)` — appends new findings to an existing report using only the new delta
-- `debug_symptom(cached_summary, chat_history, symptom, llm)` — injects the full cached report as conversation context, then processes the user's symptom against it
+- `analyze_new_thread(readme, codebase, commits, llm)` — generates the initial report from the full source tree. The prompt instructs the LLM to reference actual function names, class hierarchies, and module dependencies visible in the code
+- `analyze_incremental(cached_summary, delta_diff, new_commits, llm)` — appends new findings to an existing report using only the new delta, preserving prior context
+- `debug_symptom(cached_summary, chat_history, symptom, llm)` — injects the full cached report as conversation context, then processes the user's symptom to produce a commit-level forensic diagnosis
 
 All three prompts instruct the LLM to output strict structured Markdown so the frontend can render it predictably.
 
@@ -226,9 +228,11 @@ incoming HEAD SHA != stored last_analyzed_commit
     → store new HEAD SHA
 
 no thread exists for this repo_url
-    → fetch README + cumulative diff across last 5 commits
-    → pass both to LLM for full initial analysis
-    → create new thread row
+    → fetch README
+    → fetch FULL source tree (recursive tree API, up to 80 files / 120k chars)
+      prioritised: source code > config > docs, binaries and build dirs skipped
+    → pass both to LLM for deep initial analysis
+    → create new thread row with HEAD SHA
 ```
 
 ---
@@ -280,9 +284,9 @@ The core ingest endpoint. Accepts a GitHub repo URL, runs the cache branching lo
 ```
 
 `cache_status` values:
-- `miss` — new thread created, full analysis performed
-- `hit` — no new commits, cached report returned
-- `updated` — new commits found, delta analyzed and report updated
+- `miss` — new thread created, full source tree scanned and analyzed
+- `hit` — no new commits, cached report returned instantly (0 LLM calls)
+- `updated` — new commits found, delta diff analyzed and report updated
 
 ### `GET /api/threads/{thread_id}`
 Returns a single thread with its full chat history. Used when loading a specific thread directly.
@@ -335,7 +339,7 @@ To add a new provider, create a class in `backend/llm/` that extends `LLMProvide
 | `ANTHROPIC_MODEL` | No | `claude-sonnet-4-6` | Anthropic model ID |
 | `OPENAI_API_KEY` | If OpenAI | — | OpenAI API key |
 | `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model ID |
-| `GITHUB_TOKEN` | No | — | GitHub PAT — raises rate limit from 60 to 5,000 req/hr |
+| `GITHUB_TOKEN` | Strongly recommended | — | GitHub PAT — raises rate limit from 60 to 5,000 req/hr. Without it, the full source tree scan on a large repo can exhaust the unauthenticated quota |
 | `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS allowed origins |
 
 ### Frontend
