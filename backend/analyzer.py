@@ -1,15 +1,17 @@
 from llm.base import LLMProvider
 
 _SYSTEM = """You are Blameflow — an expert git forensics engine and code archaeologist.
-Your role is to analyze commit histories and diffs to surface hidden architectural risks,
-and to pinpoint the exact commits and lines responsible for production regressions.
+Your role is to analyze full codebases and commit histories to surface hidden architectural
+risks, and to pinpoint the exact commits and lines responsible for production regressions.
 
 Rules:
 - Always output clean, structured Markdown using the exact section headers requested.
 - Be precise: reference specific commit SHAs (short), file paths, and line numbers.
 - When flagging risks, focus on cross-cutting concerns, missing validations, silent
   dependency side-effects, and logic shared across features.
-- Never speculate beyond what the diffs actually show. If uncertain, say so.
+- For new threads you have the FULL source tree — use it. Reference actual function names,
+  class hierarchies, and module dependencies you can see in the code.
+- Never speculate beyond what the code and diffs actually show. If uncertain, say so.
 """
 
 
@@ -20,15 +22,17 @@ def _commits_text(commits: list[dict]) -> str:
     )
 
 
-# ── Flow A: New thread ────────────────────────────────────────────────────────
+# ── Flow A: New thread (full codebase scan) ───────────────────────────────────
 
 def analyze_new_thread(
     readme: str,
-    diff: str,
+    codebase: str,
     commits: list[dict],
     llm: LLMProvider,
 ) -> str:
     prompt = f"""Analyze this repository and produce a structured Blameflow report.
+You have access to the FULL source tree, not just a diff. Use it to build a deep
+understanding of the architecture before flagging risks.
 
 ## README
 {readme or "(No README found)"}
@@ -36,26 +40,30 @@ def analyze_new_thread(
 ## Recent Commits (newest → oldest)
 {_commits_text(commits)}
 
-## Cumulative Diff (last {len(commits)} commits)
-```diff
-{diff or "(No diff available — repository may have a single commit)"}
-```
+## Full Source Tree
+{codebase or "(Source tree unavailable)"}
 
 Produce a report with EXACTLY these sections and no others:
 
 ## Codebase Overview
-[2–3 paragraphs on what this repo does architecturally. Identify key modules, patterns, and tech stack inferred from the diff and README.]
+[3–4 paragraphs. Cover: what this repo does, the overall architecture (layers, modules,
+key patterns), the tech stack, and how the major components interact. Reference actual
+file paths and function/class names you can see in the source.]
 
 ## Recent Activity Summary
-[Plain-English summary of what these {len(commits)} commits changed structurally — not just what files changed, but why it matters architecturally.]
+[Plain-English summary of what these {len(commits)} commits changed — not just which
+files, but how those changes affect the architecture and which other modules they touch.]
 
 ## ⚠️ Pre-emptive Risk Flags
-- **[Risk title]:** [What the risk is, which commit introduced it, and why it's dangerous.] *(commit `SHA`, file `path/to/file`)*
+- **[Risk title]:** [What the risk is, why it's dangerous, and which file/function is the
+  blast radius.] *(commit `SHA` if introduced recently, file `path/to/file:line`)*
 
-[List 2–4 distinct risk flags. If there are genuinely no risks, say "No significant risks detected in this delta."]
+[List 3–5 distinct risk flags grounded in the actual source code. Flag things like:
+missing input validation, shared utilities modified without updating all callers,
+unhandled error paths, implicit coupling between modules, security anti-patterns.]
 
 ---
-*Analyzed {len(commits)} commits · `{commits[-1]['short_sha']}` → `{commits[0]['short_sha']}`*
+*Full scan · HEAD `{commits[0]['short_sha']}` · {len(commits)} recent commits indexed*
 """
     return llm.complete([{"role": "user", "content": prompt}], system=_SYSTEM)
 

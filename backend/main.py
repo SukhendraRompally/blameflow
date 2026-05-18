@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 import database
 from analyzer import analyze_incremental, analyze_new_thread, debug_symptom
-from github_client import fetch_diff, fetch_readme, fetch_recent_commits, parse_repo_url
+from github_client import fetch_diff, fetch_full_codebase, fetch_readme, fetch_recent_commits, parse_repo_url
 from llm import LLMProvider, get_provider
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
@@ -120,23 +120,22 @@ def sync_thread(req: SyncRequest):
             "message": f"Synced {len(new_commits)} new commit(s).",
         }
 
-    # ── Case 3: brand-new thread ──────────────────────────────────────────────
+    # ── Case 3: brand-new thread — full codebase scan ────────────────────────
     readme = fetch_readme(owner, repo)
-    base_sha = commits[-1]["sha"]
 
     try:
-        full_diff = fetch_diff(owner, repo, base_sha, head_sha)
+        codebase = fetch_full_codebase(owner, repo, head_sha)
     except Exception:
-        full_diff = ""
+        codebase = ""
 
-    cached_summary = analyze_new_thread(readme, full_diff, commits, get_llm())
+    cached_summary = analyze_new_thread(readme, codebase, commits, get_llm())
     thread = database.create_thread(canonical_url, repo_name, head_sha, cached_summary)
 
     return {
         "thread": thread,
         "chat_history": [],
         "cache_status": "miss",
-        "message": f"New thread created — analyzed {len(commits)} commits.",
+        "message": f"New thread created — full codebase scanned.",
     }
 
 
