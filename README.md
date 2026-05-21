@@ -20,6 +20,7 @@ Blameflow is an AI-powered git forensics tool built for engineers who need to un
 - [Deployment](#deployment)
   - [Backend on Render](#backend-on-render)
   - [Frontend on Vercel](#frontend-on-vercel)
+- [Future Enhancements](#future-enhancements)
 
 ---
 
@@ -446,3 +447,31 @@ Once both services are live:
 - Copy the Vercel frontend URL → update `ALLOWED_ORIGINS` in Render
 
 Vercel re-deploys automatically on every push to `main`. Render does too by default.
+
+---
+
+## Future Enhancements
+
+The current build is a working prototype. Below is the architectural roadmap toward a production-grade system — ordered by impact.
+
+### 1. Real RAG (replace context stuffing)
+Today Blameflow dumps up to 120k characters into a single prompt. The right architecture is AST-aware chunking (function/class-level, not file-level), vector embeddings per chunk stored in pgvector, and per-query retrieval of only the relevant evidence. This makes the system scale to monorepos of any size and improves answer precision — the LLM sees exactly what it needs instead of everything.
+
+### 2. Multi-step agentic diagnosis
+Currently each diagnosis is one LLM call. A real agent would have tools — `fetch_file`, `git_blame`, `search_codebase`, `fetch_incident_context` — and run an iterative loop: hypothesize → look for evidence → refine → conclude. The output becomes a chain of reasoning, not just an answer, which is both more accurate and fully auditable.
+
+### 3. Autonomous incident first responder
+Integrate with alerting systems (PagerDuty, Azure Monitor, OpsGenie). When an alert fires, Blameflow automatically scans commits from the past 24 hours and drops a candidate diagnosis into the incident Slack/Teams thread — before any human starts investigating. The HITL feedback loop we've already built becomes the data source for calibrating confidence thresholds before auto-posting.
+
+### 4. Shift left — live in the developer workflow
+The web app is a demo surface. Where this belongs: a **GitHub App** that posts risk flags as PR review comments before merge; a **VS Code extension** that annotates files with commit-level risk history inline; and a **GitHub Actions gate** that fails PRs introducing high-confidence risk patterns. Every touch point generates more labeled outcome data, which feeds back into the model.
+
+### 5. Persistent codebase knowledge graph
+Replace stateless per-sync analysis with a graph where nodes are files, commits, functions, authors, and incidents — and edges are dependencies, changes, and causal links. This enables queries that are impossible today: "this file has been the root cause of 6 incidents in 18 months," or "unvalidated schema migrations on FK-constrained tables fail in prod 68% of the time across this org." Risk scoring becomes a graph query, not a prompt.
+
+### 6. Org-level pattern memory and feedback flywheel
+The thumbs up / thumbs down feedback we built is the foundation. At org scale, anonymized signal across hundreds of repos trains a classifier that continuously improves false-positive rates. Teams that adopt Blameflow later benefit from patterns learned by earlier adopters. That's the network-effect moat that turns this from a tool into institutional memory.
+
+---
+
+**The product arc:** today Blameflow is reactive — you use it after something breaks. The roadmap makes it preventive (catch risks before merge), then autonomous (self-triggering on alerts), then institutional (learns from every team's history across the org). Each stage has a measurable metric: mean-time-to-root-cause → pre-merge catch rate → false-positive rate → incidents-per-deploy.
