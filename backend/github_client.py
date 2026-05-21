@@ -1,5 +1,6 @@
 import base64
 import os
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -181,24 +182,25 @@ def _fetch_file_content(owner: str, repo: str, path: str) -> str:
         return ""
 
 
-def fetch_full_codebase(owner: str, repo: str, sha: str) -> str:
+def fetch_full_codebase(owner: str, repo: str, sha: str) -> tuple[str, dict]:
     """
     Fetch the full source tree at HEAD for first-time thread analysis.
-    Returns a concatenated, annotated string of all relevant files up to
-    MAX_CODEBASE_CHARS, prioritised by file type.
+    Returns (codebase_str, metadata_dict) where metadata contains scan stats.
     """
+    start = time.time()
     try:
         paths = _fetch_file_tree(owner, repo, sha)
     except Exception:
-        return ""
+        return "", {}
 
+    total_files = len(paths)
     parts: list[str] = []
     total = 0
     fetched = 0
 
     for path in paths:
         if fetched >= MAX_FILES or total >= MAX_CODEBASE_CHARS:
-            remaining = len(paths) - fetched
+            remaining = total_files - fetched
             parts.append(
                 f"\n\n... [{remaining} more files not shown — "
                 f"limit of {MAX_FILES} files / {MAX_CODEBASE_CHARS:,} chars reached]\n"
@@ -214,4 +216,11 @@ def fetch_full_codebase(owner: str, repo: str, sha: str) -> str:
         total += len(chunk)
         fetched += 1
 
-    return "".join(parts)
+    metadata = {
+        "files_scanned": fetched,
+        "total_files": total_files,
+        "chars_sent": total,
+        "excluded_dirs": sorted(_SKIP_DIRS),
+        "duration_ms": int((time.time() - start) * 1000),
+    }
+    return "".join(parts), metadata

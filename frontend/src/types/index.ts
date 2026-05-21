@@ -1,9 +1,18 @@
+export interface ScanMetadata {
+  files_scanned: number;
+  total_files: number;
+  chars_sent: number;
+  excluded_dirs: string[];
+  duration_ms: number;
+}
+
 export interface Thread {
   thread_id: string;
   repo_url: string;
   repo_name: string;
   last_analyzed_commit: string | null;
   cached_summary: string | null;
+  scan_metadata: ScanMetadata | null;
   created_at: string;
   updated_at: string;
 }
@@ -25,4 +34,10 @@ export interface SyncResponse {
 export interface ThreadDetailResponse {
   thread: Thread;
   chat_history: ChatMessage[];
+}
+
+export interface RiskFeedback {
+  flag_index: number;
+  verdict: "helpful" | "false_positive";
+  note?: string;
 }

@@ -1,6 +1,6 @@
 from llm.base import LLMProvider
 
-_SYSTEM = """You are Blameflow — an expert git forensics engine and code archaeologist.
+SYSTEM = """You are Blameflow — an expert git forensics engine and code archaeologist.
 Your role is to analyze full codebases and commit histories to surface hidden architectural
 risks, and to pinpoint the exact commits and lines responsible for production regressions.
 
@@ -13,6 +13,8 @@ Rules:
   class hierarchies, and module dependencies you can see in the code.
 - Never speculate beyond what the code and diffs actually show. If uncertain, say so.
 """
+
+_SYSTEM = SYSTEM  # backward compat alias
 
 
 def _commits_text(commits: list[dict]) -> str:
@@ -75,7 +77,17 @@ def analyze_incremental(
     delta_diff: str,
     new_commits: list[dict],
     llm: LLMProvider,
+    feedback: list[dict] | None = None,
 ) -> str:
+    feedback_section = ""
+    if feedback:
+        lines = "\n".join(
+            f"  - Risk flag #{f['flag_index']}: marked as '{f['verdict']}'"
+            + (f" — note: {f['note']}" if f.get("note") else "")
+            for f in feedback
+        )
+        feedback_section = f"\n## User Feedback on Prior Risk Flags\n{lines}\n"
+
     prompt = f"""Update the existing Blameflow report with new commit activity.
 
 ## Existing Report
@@ -88,11 +100,12 @@ def analyze_incremental(
 ```diff
 {delta_diff or "(No diff available)"}
 ```
-
+{feedback_section}
 Instructions:
 1. Keep "Codebase Overview" exactly as-is unless this delta fundamentally changes the architecture.
 2. REPLACE "Recent Activity Summary" with a fresh summary covering only these new commits.
-3. APPEND any new risk flags discovered in this delta to "⚠️ Pre-emptive Risk Flags". Keep prior flags.
+3. APPEND any new risk flags discovered in this delta to "⚠️ Pre-emptive Risk Flags". Keep prior flags
+   UNLESS they were marked as 'false_positive' by the user — in that case, remove them.
 4. Update the footer line with the new HEAD SHA.
 
 Output the COMPLETE updated report (all sections, full text).
@@ -102,13 +115,12 @@ Output the COMPLETE updated report (all sections, full text).
 
 # ── Flow C: Interactive debugger ──────────────────────────────────────────────
 
-def debug_symptom(
+def build_debug_messages(
     cached_summary: str,
     chat_history: list[dict],
     symptom: str,
-    llm: LLMProvider,
-) -> str:
-    # Seed the conversation with the full codebase context
+) -> list[dict]:
+    """Build the messages list for a debug query. Usable for both batch and streaming."""
     messages: list[dict] = [
         {
             "role": "user",
@@ -166,4 +178,14 @@ and list the top 2 candidates with your reasoning for each.*
         }
     )
 
+    return messages
+
+
+def debug_symptom(
+    cached_summary: str,
+    chat_history: list[dict],
+    symptom: str,
+    llm: LLMProvider,
+) -> str:
+    messages = build_debug_messages(cached_summary, chat_history, symptom)
     return llm.complete(messages, system=_SYSTEM)

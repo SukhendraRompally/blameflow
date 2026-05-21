@@ -58,6 +58,21 @@ def init_db() -> None:
                     created_at TEXT NOT NULL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS risk_feedback (
+                    id         BIGSERIAL PRIMARY KEY,
+                    thread_id  TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+                    flag_index INTEGER NOT NULL,
+                    verdict    TEXT NOT NULL,
+                    note       TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(thread_id, flag_index)
+                )
+            """)
+            # migrations for existing deployments
+            cur.execute("""
+                ALTER TABLE threads ADD COLUMN IF NOT EXISTS scan_metadata JSONB
+            """)
 
 
 def _now() -> str:
@@ -94,18 +109,22 @@ def create_thread(
     repo_name: str,
     last_analyzed_commit: str,
     cached_summary: str,
+    scan_metadata: Optional[dict] = None,
 ) -> dict:
     thread_id = uuid.uuid4().hex[:8]
     now = _now()
+    meta_val = psycopg2.extras.Json(scan_metadata) if scan_metadata else None
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO threads
-                    (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary,
+                     scan_metadata, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary, now, now),
+                (thread_id, repo_url, repo_name, last_analyzed_commit, cached_summary,
+                 meta_val, now, now),
             )
     return get_thread_by_id(thread_id)
 
@@ -147,3 +166,45 @@ def add_chat_message(thread_id: str, role: str, content: str) -> None:
                 "INSERT INTO chat_messages (thread_id, role, content, created_at) VALUES (%s, %s, %s, %s)",
                 (thread_id, role, content, _now()),
             )
+
+
+# ── Risk feedback CRUD ────────────────────────────────────────────────────────
+
+def get_feedback(thread_id: str) -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT flag_index, verdict, note FROM risk_feedback WHERE thread_id = %s ORDER BY flag_index",
+                (thread_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def upsert_feedback(thread_id: str, flag_index: int, verdict: str, note: str = "") -> None:
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO risk_feedback (thread_id, flag_index, verdict, note, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (thread_id, flag_index)
+                DO UPDATE SET verdict = EXCLUDED.verdict, note = EXCLUDED.note
+                """,
+                (thread_id, flag_index, verdict, note or None, _now()),
+            )
+
+
+def reset_thread(thread_id: str) -> None:
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE threads
+                SET cached_summary = NULL, last_analyzed_commit = NULL,
+                    scan_metadata = NULL, updated_at = %s
+                WHERE thread_id = %s
+                """,
+                (_now(), thread_id),
+            )
+            cur.execute("DELETE FROM chat_messages WHERE thread_id = %s", (thread_id,))
+            cur.execute("DELETE FROM risk_feedback WHERE thread_id = %s", (thread_id,))

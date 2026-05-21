@@ -1,3 +1,4 @@
+import json
 import os
 
 from dotenv import load_dotenv
@@ -6,10 +7,11 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import database
-from analyzer import analyze_incremental, analyze_new_thread, debug_symptom
+from analyzer import SYSTEM, analyze_incremental, analyze_new_thread, build_debug_messages
 from github_client import fetch_diff, fetch_full_codebase, fetch_readme, fetch_recent_commits, parse_repo_url
 from llm import LLMProvider, get_provider
 
@@ -46,6 +48,12 @@ class SyncRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+
+
+class FeedbackRequest(BaseModel):
+    flag_index: int
+    verdict: str  # "helpful" | "false_positive"
+    note: str = ""
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -109,8 +117,10 @@ def sync_thread(req: SyncRequest):
                 break
             new_commits.append(c)
 
+        prior_feedback = database.get_feedback(existing["thread_id"])
         updated_summary = analyze_incremental(
-            existing["cached_summary"], delta_diff, new_commits or commits, llm
+            existing["cached_summary"], delta_diff, new_commits or commits, get_llm(),
+            feedback=prior_feedback,
         )
         thread = database.update_thread(existing["thread_id"], head_sha, updated_summary)
         return {
@@ -124,12 +134,12 @@ def sync_thread(req: SyncRequest):
     readme = fetch_readme(owner, repo)
 
     try:
-        codebase = fetch_full_codebase(owner, repo, head_sha)
+        codebase, scan_metadata = fetch_full_codebase(owner, repo, head_sha)
     except Exception:
-        codebase = ""
+        codebase, scan_metadata = "", None
 
     cached_summary = analyze_new_thread(readme, codebase, commits, get_llm())
-    thread = database.create_thread(canonical_url, repo_name, head_sha, cached_summary)
+    thread = database.create_thread(canonical_url, repo_name, head_sha, cached_summary, scan_metadata)
 
     return {
         "thread": thread,
@@ -159,9 +169,39 @@ def chat(thread_id: str, req: ChatRequest):
         raise HTTPException(status_code=422, detail="Thread has no analysis yet. Run a sync first.")
 
     history = database.get_chat_history(thread_id)
-    response_text = debug_symptom(thread["cached_summary"], history, req.message, get_llm())
-
     database.add_chat_message(thread_id, "user", req.message)
-    database.add_chat_message(thread_id, "assistant", response_text)
+    messages = build_debug_messages(thread["cached_summary"], history, req.message)
 
-    return {"role": "assistant", "content": response_text}
+    def generate():
+        tokens: list[str] = []
+        for token in get_llm().stream(messages, system=SYSTEM):
+            tokens.append(token)
+            yield f"data: {json.dumps(token)}\n\n"
+        yield "data: [DONE]\n\n"
+        database.add_chat_message(thread_id, "assistant", "".join(tokens))
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/threads/{thread_id}/feedback")
+def submit_feedback(thread_id: str, req: FeedbackRequest):
+    thread = database.get_thread_by_id(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found.")
+    if req.verdict not in ("helpful", "false_positive"):
+        raise HTTPException(status_code=400, detail="verdict must be 'helpful' or 'false_positive'")
+    database.upsert_feedback(thread_id, req.flag_index, req.verdict, req.note)
+    return {"status": "ok"}
+
+
+@app.post("/api/threads/{thread_id}/reset")
+def reset_thread(thread_id: str):
+    thread = database.get_thread_by_id(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found.")
+    database.reset_thread(thread_id)
+    return {"status": "reset", "thread_id": thread_id}

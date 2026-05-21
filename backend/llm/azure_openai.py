@@ -1,4 +1,5 @@
 import os
+from typing import Iterator
 
 from openai import AzureOpenAI
 
@@ -24,16 +25,30 @@ class AzureOpenAIProvider(LLMProvider):
     def name(self) -> str:
         return "azure_openai"
 
-    def complete(self, messages: list[dict], system: str = "") -> str:
+    def _build_messages(self, messages: list[dict], system: str) -> list[dict]:
         all_messages: list[dict] = []
         if system:
             all_messages.append({"role": "system", "content": system})
         all_messages.extend(messages)
+        return all_messages
 
+    def complete(self, messages: list[dict], system: str = "") -> str:
         response = self._client.chat.completions.create(
             model=self._deployment,
-            messages=all_messages,
+            messages=self._build_messages(messages, system),
             temperature=0.2,
             max_tokens=3000,
         )
         return response.choices[0].message.content or ""
+
+    def stream(self, messages: list[dict], system: str = "") -> Iterator[str]:
+        response = self._client.chat.completions.create(
+            model=self._deployment,
+            messages=self._build_messages(messages, system),
+            temperature=0.2,
+            max_tokens=3000,
+            stream=True,
+        )
+        for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

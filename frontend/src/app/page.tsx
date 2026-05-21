@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
 import { GitBranch, BarChart2, Terminal, AlertCircle, X, Loader2 } from "lucide-react";
 import type { CacheStatus, ChatMessage, Thread } from "@/types";
-import { listThreads, sendChat, syncThread } from "@/lib/api";
+import { listThreads, resetThread, streamChat, syncThread } from "@/lib/api";
 import ThreadSidebar from "@/components/ThreadSidebar";
 import RiskDashboard from "@/components/RiskDashboard";
 import ChatInterface from "@/components/ChatInterface";
@@ -123,6 +123,7 @@ export default function Home() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThread, setActiveThread] = useState<Thread | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [streamingMessage, setStreamingMessage] = useState("");
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>("");
   const [cacheMessage, setCacheMessage] = useState("");
   const [tab, setTab] = useState<Tab>("analysis");
@@ -167,18 +168,43 @@ export default function Home() {
 
   async function handleSendMessage(message: string) {
     if (!activeThread) return;
-    // Optimistic user message
     setChatHistory((prev) => [...prev, { role: "user", content: message }]);
+    setIsLoading(true);
+    setStreamingMessage("");
+    setError(null);
+
+    let accumulated = "";
+    try {
+      await streamChat(
+        activeThread.thread_id,
+        message,
+        (token) => {
+          accumulated += token;
+          setStreamingMessage(accumulated);
+        },
+        () => {
+          setChatHistory((prev) => [...prev, { role: "assistant", content: accumulated }]);
+          setStreamingMessage("");
+          setIsLoading(false);
+        },
+      );
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to get a response.");
+      setChatHistory((prev) => prev.slice(0, -1));
+      setStreamingMessage("");
+      setIsLoading(false);
+    }
+  }
+
+  async function handleReanalyze() {
+    if (!activeThread) return;
     setIsLoading(true);
     setError(null);
     try {
-      const reply = await sendChat(activeThread.thread_id, message);
-      setChatHistory((prev) => [...prev, reply]);
+      await resetThread(activeThread.thread_id);
+      await handleSyncRepo(activeThread.repo_url);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to get a response.");
-      // Remove optimistic message on failure
-      setChatHistory((prev) => prev.slice(0, -1));
-    } finally {
+      setError(e instanceof Error ? e.message : "Failed to reset thread.");
       setIsLoading(false);
     }
   }
@@ -253,10 +279,13 @@ export default function Home() {
                   cacheStatus={cacheStatus}
                   cacheMessage={cacheMessage}
                   isLoading={isLoading}
+                  onReanalyze={handleReanalyze}
                 />
               ) : (
                 <ChatInterface
+                  thread={activeThread}
                   chatHistory={chatHistory}
+                  streamingMessage={streamingMessage}
                   onSendMessage={handleSendMessage}
                   isLoading={isLoading}
                 />

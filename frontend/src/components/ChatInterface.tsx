@@ -5,10 +5,60 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import clsx from "clsx";
 import { Send, Bot, User, Loader2, Terminal } from "lucide-react";
-import type { ChatMessage } from "@/types";
+import type { ChatMessage, Thread } from "@/types";
+
+// ── Clickable SHA / file-path code wrapper (shared with RiskDashboard) ────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeCodeComponent(repoUrl: string, headSha: string | null): (props: any) => JSX.Element {
+  const repoPath = repoUrl.replace("https://github.com/", "");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return function CodeEl({ children, ...props }: any) {
+    const text = String(children).trim();
+
+    if (/^[0-9a-f]{7}$/.test(text) && repoPath) {
+      return (
+        <a
+          href={`https://github.com/${repoPath}/commit/${text}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[#e51414] hover:underline"
+        >
+          <code {...props}>{children}</code>
+        </a>
+      );
+    }
+
+    if (
+      headSha &&
+      repoPath &&
+      /^[\w\-./]+\.[a-z]{1,8}(:[0-9]+(-[0-9]+)?)?$/.test(text) &&
+      text.includes("/") &&
+      !text.includes(" ")
+    ) {
+      const [filePath, lineRef] = text.split(":");
+      const hash = lineRef ? `#L${lineRef}` : "";
+      return (
+        <a
+          href={`https://github.com/${repoPath}/blob/${headSha}/${filePath}${hash}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-blue-400 hover:underline"
+        >
+          <code {...props}>{children}</code>
+        </a>
+      );
+    }
+
+    return <code {...props}>{children}</code>;
+  };
+}
 
 interface Props {
+  thread: Thread;
   chatHistory: ChatMessage[];
+  streamingMessage: string;
   onSendMessage: (msg: string) => void;
   isLoading: boolean;
 }
@@ -28,14 +78,20 @@ function UserBubble({ content }: { content: string }) {
   );
 }
 
-function AssistantBubble({ content }: { content: string }) {
+function AssistantBubble({
+  content,
+  codeEl,
+}: {
+  content: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  codeEl: (props: any) => JSX.Element;
+}) {
   return (
     <div className="flex gap-2.5 animate-fade-in">
       <div className="w-7 h-7 rounded-full bg-[rgba(229,20,20,0.15)] border border-[rgba(229,20,20,0.25)] flex items-center justify-center flex-shrink-0 mt-0.5">
         <Bot size={13} className="text-[#e51414]" />
       </div>
       <div className="flex-1 min-w-0">
-        {/* Header chip */}
         <div className="flex items-center gap-1.5 mb-2">
           <span className="text-[10px] font-semibold text-[#e51414] tracking-widest uppercase">
             Blameflow
@@ -43,7 +99,11 @@ function AssistantBubble({ content }: { content: string }) {
           <div className="h-px flex-1 bg-[#27272a]" />
         </div>
         <div className="bg-[#18181b] border border-[#27272a] rounded-xl rounded-tl-sm p-4">
-          <ReactMarkdown className="bf-chat-markdown" remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown
+            className="bf-chat-markdown"
+            remarkPlugins={[remarkGfm]}
+            components={{ code: codeEl }}
+          >
             {content}
           </ReactMarkdown>
         </div>
@@ -107,14 +167,15 @@ function EmptyChat() {
   );
 }
 
-export default function ChatInterface({ chatHistory, onSendMessage, isLoading }: Props) {
+export default function ChatInterface({ thread, chatHistory, streamingMessage, onSendMessage, isLoading }: Props) {
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const CodeEl = makeCodeComponent(thread.repo_url, thread.last_analyzed_commit);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory, isLoading]);
+  }, [chatHistory, streamingMessage, isLoading]);
 
   // Auto-grow textarea
   useEffect(() => {
@@ -156,7 +217,7 @@ export default function ChatInterface({ chatHistory, onSendMessage, isLoading }:
 
       {/* ── Messages ────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto px-5 py-4">
-        {chatHistory.length === 0 && !isLoading ? (
+        {chatHistory.length === 0 && !isLoading && !streamingMessage ? (
           <EmptyChat />
         ) : (
           <div className="space-y-5 max-w-3xl">
@@ -164,10 +225,14 @@ export default function ChatInterface({ chatHistory, onSendMessage, isLoading }:
               msg.role === "user" ? (
                 <UserBubble key={i} content={msg.content} />
               ) : (
-                <AssistantBubble key={i} content={msg.content} />
+                <AssistantBubble key={i} content={msg.content} codeEl={CodeEl} />
               )
             )}
-            {isLoading && <TypingIndicator />}
+            {streamingMessage ? (
+              <AssistantBubble content={streamingMessage} codeEl={CodeEl} />
+            ) : isLoading ? (
+              <TypingIndicator />
+            ) : null}
             <div ref={endRef} />
           </div>
         )}

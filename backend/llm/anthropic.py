@@ -1,8 +1,11 @@
 import os
+from typing import Iterator
 
 from anthropic import Anthropic
 
 from .base import LLMProvider
+
+_DEFAULT_SYSTEM = "You are a helpful code analysis assistant."
 
 
 class AnthropicProvider(LLMProvider):
@@ -18,7 +21,16 @@ class AnthropicProvider(LLMProvider):
         response = self._client.messages.create(
             model=self._model,
             max_tokens=3000,
-            system=system or "You are a helpful code analysis assistant.",
+            system=system or _DEFAULT_SYSTEM,
             messages=messages,
         )
         return response.content[0].text
+
+    def stream(self, messages: list[dict], system: str = "") -> Iterator[str]:
+        with self._client.messages.stream(
+            model=self._model,
+            max_tokens=3000,
+            system=system or _DEFAULT_SYSTEM,
+            messages=messages,
+        ) as s:
+            yield from s.text_stream
